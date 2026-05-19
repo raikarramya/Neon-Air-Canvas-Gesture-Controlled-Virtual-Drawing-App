@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Air Canvas</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b0c10;
+            color: #ecf0f1;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Drawing Canvas (Main View) */
+        #drawingCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* Webcam Feedback (Mirrored & PiP Style) */
+        #webcam {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            transform: scaleX(-1); /* Mirror feedback */
+            border-radius: 12px;
+            border: 2px solid #1f2833;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            z-index: 2;
+            background: #000;
+            object-fit: cover;
+        }
+
+        /* UI Toolbar Control Panel */
+        #toolbar {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(31, 40, 51, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid #45a29e;
+            padding: 12px 24px;
+            border-radius: 50px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            z-index: 10;
+            box-shadow: 0 4px 20px rgba(0, 255, 200, 0.2);
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        input[type="color"] {
+            -webkit-appearance: none;
+            border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            cursor: pointer;
+            background: none;
+        }
+
+        input[type="color"]::-webkit-color-swatch-wrapper {
+            padding: 0;
+        }
+
+        input[type="color"]::-webkit-color-swatch {
+            border: 2px solid #fff;
+            border-radius: 50%;
+            box-shadow: 0 0 8px rgba(255,255,255,0.5);
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100px;
+            background: #0b0c10;
+            height: 6px;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #66fcf1;
+            cursor: pointer;
+            box-shadow: 0 0 8px #66fcf1;
+        }
+
+        /* Status Text Indicator */
+        #status {
+            text-transform: uppercase;
+            color: #66fcf1;
+            text-shadow: 0 0 10px #66fcf1;
+            min-width: 90px;
+            text-align: center;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: #66fcf1;
+            text-shadow: 0 0 15px #66fcf1;
+            z-index: 100;
+            pointer-events: none;
+            transition: opacity 0.5s ease;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">Initializing MediaPipe Camera Context...</div>
+
+    <div id="container">
+        <div id="toolbar">
+            <div class="control-group">
+                <label for="colorPicker">Neon:</label>
+                <input type="color" id="colorPicker" value="#00ffcc">
+            </div>
+            <div class="control-group">
+                <label for="brushSize">Size:</label>
+                <input type="range" id="brushSize" min="4" max="40" value="12">
+            </div>
+            <div class="control-group" style="border-left: 1px solid #45a29e; padding-left: 15px;">
+                <span>Mode:</span>
+                <span id="status">Waiting...</span>
+            </div>
+        </div>
+
+        <canvas id="drawingCanvas"></canvas>
+
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('drawingCanvas');
+        const ctx = canvasElement.getContext('2d');
+        const statusElement = document.getElementById('status');
+        const loadingElement = document.getElementById('loading');
+        const colorPicker = document.getElementById('colorPicker');
+        const brushSizeSlider = document.getElementById('brushSize');
+
+        // Points tracking structure for trail updates
+        let paths = []; 
+        let currentPath = [];
+        let isDrawing = false;
+
+        // Resize drawing board setup
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+            redrawCanvas();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Canvas refresh configuration for neon strokes
+        function redrawCanvas() {
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Loop through stored paths to retain persisting elements
+            paths.forEach(path => {
+                if (path.points.length < 2) return;
+                
+                ctx.beginPath();
+                ctx.moveTo(path.points[0].x, path.points[0].y);
+                for (let i = 1; i < path.points.length; i++) {
+                    ctx.lineTo(path.points[i].x, path.points[i].y);
+                }
+
+                ctx.strokeStyle = path.color;
+                ctx.lineWidth = path.size;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                // Neon Glow Effects Engine
+                ctx.shadowColor = path.color;
+                ctx.shadowBlur = path.size * 1.5;
+
+                ctx.stroke();
+            });
+
+            // Handle current realtime active path stroke styling
+            if (currentPath.length >= 2) {
+                ctx.beginPath();
+                ctx.moveTo(currentPath[0].x, currentPath[0].y);
+                for (let i = 1; i < currentPath.length; i++) {
+                    ctx.lineTo(currentPath[i].x, currentPath[i].y);
+                }
+                const activeColor = colorPicker.value;
+                const activeSize = parseInt(brushSizeSlider.value);
+
+                ctx.strokeStyle = activeColor;
+                ctx.lineWidth = activeSize;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.shadowColor = activeColor;
+                ctx.shadowBlur = activeSize * 1.5;
+                ctx.stroke();
+            }
+
+            // Reset shadows context rules down-funnel
+            ctx.shadowBlur = 0;
+        }
+
+        // Geometric distance calculation helper
+        function getDistance(p1, p2) {
+            return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        }
+
+        // Processing results derived from MediaPipe Tracking model structure
+        function onResults(results) {
+            // Dismiss loader notice once computational results arrive
+            if (loadingElement) {
+                loadingElement.style.opacity = 0;
+                setTimeout(() => loadingElement.remove(), 500);
+            }
+
+            redrawCanvas();
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // Coordinates for calculation mappings
+                const wrist = landmarks[0];
+                const indexTip = landmarks[8];
+                const indexPip = landmarks[6];
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                const pinkyTip = landmarks[20];
+
+                // Scale Tip distances reference baseline scale structure against wrist context metrics
+                const handScale = getDistance(wrist, indexPip);
+
+                // Analyze fingers state metrics logic (Extended / Folded status)
+                const isIndexExtended = indexTip.y < landmarks[7].y;
+                const isMiddleExtended = middleTip.y < landmarks[11].y;
+                const isRingExtended = ringTip.y < landmarks[15].y;
+                const isPinkyExtended = pinkyTip.y < landmarks[19].y;
+
+                // Absolute calculations context point conversions across standard system resolutions
+                // Webcams process input in mirror alignment rules -> Flip standard horizontal scale indices
+                const pointerX = (1 - indexTip.x) * canvasElement.width;
+                const pointerY = indexTip.y * canvasElement.height;
+
+                // Gesture Control States Rules Definition
+                if (isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+                    // State A: Single Index Extended = DRAW MODE
+                    statusElement.innerText = "Drawing";
+                    statusElement.style.color = "#00ffcc";
+                    statusElement.style.textShadow = "0 0 10px #00ffcc";
+
+                    currentPath.push({ x: pointerX, y: pointerY });
+                    isDrawing = true;
+
+                    // Hover indicator coordinate track point
+                    ctx.beginPath();
+                    ctx.arc(pointerX, pointerY, parseInt(brushSizeSlider.value) / 2, 0, 2 * Math.PI);
+                    ctx.fillStyle = colorPicker.value;
+                    ctx.fill();
+
+                } else if (isIndexExtended && isMiddleExtended && isRingExtended && isPinkyExtended) {
+                    // State B: Open Palm Extended = ERASE MODE
+                    statusElement.innerText = "Eraser";
+                    statusElement.style.color = "#ff3366";
+                    statusElement.style.textShadow = "0 0 10px #ff3366";
+
+                    if (isDrawing) {
+                        finalizeCurrentPath();
+                    }
+
+                    // Scan and clean paths colliding with coordinates of user hand position overlay
+                    const eraseRadius = parseInt(brushSizeSlider.value) * 2.5; 
+                    paths = paths.filter(path => {
+                        return !path.points.some(pt => Math.hypot(pt.x - pointerX, pt.y - pointerY) < eraseRadius);
+                    });
+
+                    // Target Visual Ring HUD Interface Marker
+                    ctx.beginPath();
+                    ctx.arc(pointerX, pointerY, eraseRadius, 0, 2 * Math.PI);
+                    ctx.strokeStyle = "rgba(255, 51, 102, 0.6)";
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                } else {
+                    // State C: Closed Fist / Any Rest State Combination = PAUSE MODE
+                    statusElement.innerText = "Paused";
+                    statusElement.style.color = "#f1c40f";
+                    statusElement.style.textShadow = "0 0 10px #f1c40f";
+                    
+                    if (isDrawing) {
+                        finalizeCurrentPath();
+                    }
+
+                    // Hover/Tracking indicator point
+                    ctx.beginPath();
+                    ctx.arc(pointerX, pointerY, 6, 0, 2 * Math.PI);
+                    ctx.fillStyle = "#f1c40f";
+                    ctx.fill();
+                }
+            } else {
+                // Handle no tracking input framework instances safely
+                statusElement.innerText = "No Hand";
+                statusElement.style.color = "#bdc3c7";
+                statusElement.style.textShadow = "none";
+                if (isDrawing) finalizeCurrentPath();
+            }
+        }
+
+        function finalizeCurrentPath() {
+            if (currentPath.length > 0) {
+                paths.push({
+                    points: currentPath,
+                    color: colorPicker.value,
+                    size: parseInt(brushSizeSlider.value)
+                });
+                currentPath = [];
+            }
+            isDrawing = false;
+        }
+
+        // Initialize MediaPipe Hands Object Configuration
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        // Bootstrap Camera Pipeline Processing
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start().catch(err => {
+            alert("Error accessing webcam: " + err.message);
+        });
+    </script>
+</body>
+</html>
